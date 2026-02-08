@@ -1,0 +1,35 @@
+---
+title: "zabalam_interpolation"
+format: html
+editor: visual
+---
+
+```{r}
+# =============================================================================
+# TARGETED IDW INTERPOLATION FOR LEVEE REMOVAL
+# =============================================================================
+# Purpose: Fill structure pixels in a DEM using IDW interpolation from 
+#          donut ring reference points — WITHOUT computing IDW wall-to-wall.
+#
+# Inputs:
+#   1. DEM raster (WorldDEM Neo, 5m)
+#   2. Structure mask raster (anthroporas: 1 = structure, 0 = ground)
+#   3. Donut ring points (GeoPackage with VALUE column = elevation)
+#
+# Output:
+#   DEM_corrected.tif — the DEM with structures replaced by IDW surface
+# =============================================================================
+
+# ---- 1. Load libraries ----
+library(terra)   # Modern raster handling (read, write, manipulate rasters)
+library(sf)      # Read vector data (.gpkg points file)
+library(RANN)    # Fast nearest-neighbor search using KD-trees
+
+
+# ---- 2. Set file paths ----
+dem_path    <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/WorldDEMNeo_zu_5m.tif"
+mask_path   <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Mask_Structure.tif"
+points_path <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Points_for_Interpolation.gpkg"
+output_path <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected.tif"
+```
+
