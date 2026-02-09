@@ -33,3 +33,192 @@ points_path <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Interme
 output_path <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected.tif"
 ```
 
+```{r}
+# ---- 3. Load the data ----
+dem <- rast(dem_path)
+# rast() is terra function to read a raster file into R.
+# It creates a SpatRaster object like a QGIS raster layer.
+
+mask <- rast(mask_path)
+
+pts <- st_read(points_path)
+# st_read() from the sf package reads vector files (shapefiles, gpkg, geojson, etc.)
+# It returns a "simple features" data frame, like a regular table but with a geometry column.
+```
+
+```{r}
+# ---- 4. Quick sanity checks ----
+# Let's make sure everything lines up before we start processing.
+
+# Check that DEM and mask have the same dimensions and CRS
+cat("\n--- Sanity Checks ---\n")
+cat("DEM dimensions:", nrow(dem), "rows x", ncol(dem), "cols\n")
+cat("Mask dimensions:", nrow(mask), "rows x", ncol(mask), "cols\n")
+cat("DEM CRS:", crs(dem, describe = TRUE)$code, "\n")
+cat("Points CRS:", st_crs(pts)$epsg, "\n")
+cat("Number of donut ring points:", nrow(pts), "\n")
+
+# Check that the VALUE column exists
+if (!"VALUE" %in% names(pts)) {
+  stop("ERROR: Column 'VALUE' not found in points file! Check column names with: names(pts)")
+}
+cat("Elevation range in points:", round(min(pts$VALUE, na.rm = TRUE), 2), 
+    "to", round(max(pts$VALUE, na.rm = TRUE), 2), "m\n")
+cat("--- End Checks ---\n\n")
+```
+
+```{r}
+# ---- 4b. Align mask to DEM ----
+# The mask is on a slightly different grid than the DEM (2m offset, different cols).
+# resample() reprojects the mask onto the exact same pixel grid as the DEM.
+# We use method = "near" (nearest neighbor) because the mask is binary (0/1) 
+# we don't want averaging, which would create decimal values like 0.5.
+
+mask <- resample(mask, dem, method = "near")
+
+cat("Mask after resample:", nrow(mask), "rows x", ncol(mask), "cols\n")
+cat("Extents match:", ext(dem) == ext(mask), "\n")
+
+# Verify it's still binary (only 0 and 1)
+mask_unique <- unique(values(mask))
+cat("Unique mask values:", sort(mask_unique[!is.na(mask_unique)]), "\n")
+```
+
+```{r}
+# ---- 5. Extract coordinates from the donut ring points ----
+# We need a simple matrix of [X, Y] coordinates for the KD-treez and a vector of elevation values.
+
+# st_coordinates() extracts X and Y from the geometry column
+pts_coords <- st_coordinates(pts)  # Returns a matrix with columns X and Y
+pts_z      <- pts$VALUE            # The elevation values
+
+cat("Reference points ready:", nrow(pts_coords), "points\n")
+```
+
+```{r}
+# ---- 6. Build the KD-tree on reference points ----
+# A KD-tree organizes points in space so that finding nearest neighbors is very fast. Instead of measuring distance to all points (slow),it partitions space like a binary search tree and only checks nearby branches. This takes the search from O(n) to roughly O(log n).
+
+# We build the tree once on the donut ring points, then query it for each structure pixel.
+# nn2() from RANN will build the tree and search it in one call (Step 8). So we just prepare the data here.
+
+# ---- 7. Find which pixels need filling ----
+# Instead of looping over the entire DEM, we only identify pixels where the mask == 1 (structures that need replacement).
+
+# Read the mask values into a vector
+mask_values <- values(mask)  
+# values() extracts all pixel values from a raster as a vector.
+# Each element corresponds to one pixel, in row-major order (row 1 left to right, then row 2, etc.)
+
+# Find the indices where mask == 1
+# which() returns the positions (indices) where the condition is TRUE
+fill_idx <- which(mask_values == 1)
+
+cat("Pixels to fill:", length(fill_idx), 
+    "out of", ncell(dem), "total",
+    paste0("(", round(100 * length(fill_idx) / ncell(dem), 2), "%)\n"))
+
+# Now get the X,Y coordinates of those pixels
+# xyFromCell() converts cell indices to geographic coordinates
+fill_xy <- xyFromCell(dem, fill_idx)
+# This returns a matrix with columns x and y — the center coordinate of each pixel.
+```
+
+```{r}
+# ---- 8. Run targeted IDW using KD-tree ----
+# This is the core step. For ONLY the structure pixels, we:
+#   1. Find the 12 nearest donut ring points (using the KD-tree)
+#   2. Compute IDW weighted average of their elevations
+#
+# IDW formula:
+#   weight_i = 1 / distance_i^power
+#   z_estimated = sum(weight_i * z_i) / sum(weight_i)
+#
+# Parameters:
+k     <- 12   # Number of nearest neighbors
+power <- 2    # IDW power (higher = more local influence)
+
+cat("Running IDW interpolation on", length(fill_idx), "pixels...\n")
+cat("Parameters: k =", k, "neighbors, power =", power, "\n")
+
+# nn2() is the most important command:
+#   - First argument: the DATA points (donut ring) — it builds the KD-tree on these
+#   - Second argument: the QUERY points (structure pixels) — it searches for each of these
+#   - k: how many nearest neighbors to return
+#
+# It returns:
+#   $nn.idx  — matrix of indices (which reference points are nearest)
+#   $nn.dists — matrix of distances to those neighbors
+
+t_start <- Sys.time()  # Track how long it takes
+
+nn_result <- nn2(
+  data  = pts_coords,   # Reference points (donut ring) — [X, Y] matrix
+  query = fill_xy,      # Query points (structure pixels) — [X, Y] matrix
+  k     = k             # Number of nearest neighbors
+)
+
+# nn_result$nn.dists is a matrix: each row = one structure pixel, 
+#                                  each column = distance to the k-th nearest neighbor
+# nn_result$nn.idx is a matrix:   same shape, but contains the INDEX of each neighbor
+#                                  (pointing into pts_z)
+
+# Now compute IDW weights and interpolated values
+# We use vectorized operations
+
+distances <- nn_result$nn.dists  # Matrix: [n_fill_pixels x k]
+indices   <- nn_result$nn.idx    # Matrix: [n_fill_pixels x k]
+
+# Handle edge case: if a query point is exactly on a reference point,
+# distance = 0, which would cause division by zero.
+# Replace zeros with a very small number.
+distances[distances == 0] <- 1e-10
+
+# Compute weights: 1 / distance^power
+weights <- 1 / (distances ^ power)
+# This is a matrix of the same shape as distances.
+# Closer points get MUCH higher weights (because of the squaring).
+
+# Get the elevation values of the neighbors
+# indices tells us WHICH reference points are nearest, so we use it to look up z values
+neighbor_z <- matrix(pts_z[indices], nrow = nrow(indices), ncol = ncol(indices))
+# This creates a matrix where each row has the elevations of the 12 nearest points
+
+# Compute weighted average for each pixel:
+#   sum(weight * z) / sum(weight)
+# rowSums() adds up values across columns for each row
+idw_values <- rowSums(weights * neighbor_z) / rowSums(weights)
+
+cat("IDW computation complete.\n")
+cat("Interpolated elevation range:", round(min(idw_values), 2), 
+    "to", round(max(idw_values), 2), "m\n\n")
+```
+
+```{r}
+# ---- 9. Build the corrected DEM ----
+# Start with a copy of the original DEM, then replace ONLY the structure pixels.
+
+dem_corrected <- dem  # This creates a copy of the DEM raster
+
+# Read the DEM values into a vector so we can modify them
+dem_vals <- values(dem_corrected)
+
+# Replace structure pixels with our IDW-interpolated values
+dem_vals[fill_idx] <- idw_values
+
+# Write the modified values back into the raster
+values(dem_corrected) <- dem_vals
+
+# ---- 10. Save the result ----
+cat("Saving corrected DEM to:", output_path, "\n")
+
+writeRaster(
+  dem_corrected, 
+  output_path, 
+  overwrite = TRUE,
+  datatype = "FLT4S"    # 32-bit float — appropriate for elevation data
+)
+
+cat("Output saved to:", output_path, "\n")
+```
+
