@@ -29,8 +29,8 @@ library(RANN)    # Fast nearest-neighbor search using KD-trees
 # ---- 2. Set file paths ----
 dem_path    <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/WorldDEMNeo_zu_5m.tif"
 mask_path   <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Mask_Structure.tif"
-points_path <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Points_for_Interpolation.gpkg"
-output_path <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected.tif"
+points_path <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Points_for_Interpolation_50m.gpkg"
+output_path <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected_50m.tif"
 ```
 
 ```{r}
@@ -68,6 +68,8 @@ cat("--- End Checks ---\n\n")
 ```
 
 ```{r}
+#| eval: false
+#| include: false
 # ---- 4b. Align mask to DEM ----
 # The mask is on a slightly different grid than the DEM (2m offset, different cols).
 # resample() reprojects the mask onto the exact same pixel grid as the DEM.
@@ -135,7 +137,7 @@ fill_xy <- xyFromCell(dem, fill_idx)
 #   z_estimated = sum(weight_i * z_i) / sum(weight_i)
 #
 # Parameters:
-k     <- 12   # Number of nearest neighbors
+k     <- 50   # Number of nearest neighbors
 power <- 2    # IDW power (higher = more local influence)
 
 cat("Running IDW interpolation on", length(fill_idx), "pixels...\n")
@@ -221,4 +223,3 @@ writeRaster(
 
 cat("Output saved to:", output_path, "\n")
 ```
-
