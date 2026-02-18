@@ -4,6 +4,104 @@ format: html
 editor: visual
 ---
 
+# Zabalam Interpolation — Complete Methodology
+
+## Phase 1: Preparation of Removal Masks
+
+In this first phase, my goal was to prepare the specific digital "shapes" needed to remove the modern structures. I needed to define exactly which pixels to delete (the structure) and which pixels to use as a reference for repairing the ground (the surroundings).
+
+### Step 1: Defining the Structure Mask
+
+**What I was trying to achieve:** I needed to tell the computer exactly where the levees and dams are located on the map so I could eventually delete them. My digitised layer (`zabalam_structures_final`) is a polygon layer containing the buffered footprints of every structure I selected for removal. Larger structures (major canals with wide levees) were buffered by 200 m on each side (400 m total width), while smaller structures were buffered by 100 m on each side (200 m total width). These buffers were sized to ensure the polygons fully cover not just the canal bed, but also both levee slopes and crests on either side.
+
+**How I did it:** I took my polygon layer (`zabalam_structures_final`) and converted it into a raster image using the Rasterize tool. I configured this to create a binary mask where pixels with a value of 1 represented the structures and 0 represented the background. To ensure the math would work later, I made sure this new mask (`Mask_Structure.tif`) had the exact same resolution (5 m) and boundaries as my main WorldDEM file.
+
+### Step 2: Creating the "Donut" Reference Ring
+
+**What I was trying to achieve:** To repair the holes I was about to make, I needed to know the elevation of the natural ground right next to the structures. I wanted to capture a thin strip of natural floodplain immediately surrounding each structure polygon, but without including the structure itself. I call this safe zone the "Donut Ring."
+
+**How I did it:** First, I created a 10m outward buffer around my structure polygons (`zabalam_structures_final`). This created a temporary layer (`Structures_Buffered_10m.shp`). Then, I used the Difference tool to subtract the original structure polygons from this wider buffer. This left me with just the outer ring — a 10 m-wide collar running along the edges of each structure — which I saved as `Donut_Ring_Vector.shp`. Finally, I converted this vector ring into a raster file called `Mask_Donut_Ring.tif`.
+
+Best results have been found with a 50m outward buffer.
+
+### Step 3: Extracting the Reference Elevation
+
+**What I was trying to achieve:** Now that I had the shape of the "Donut Ring," I needed to extract the actual elevation values inside that shape. My goal was to create a layer that contained only the elevation of the natural ground along the structure edges, while setting everything else (both the structures and the far-away plains) to NoData so they would not influence the interpolation.
+
+**How I did it:** I used the Raster Calculator to combine my Donut Ring mask (`Mask_Donut_Ring.tif`) with the original smoothed DEM (`WorldDEMNeo_zu_5m_fps.tif`). I applied a formula that kept the elevation values only where the Donut Ring mask was equal to 1 and forced all other pixels to NoData:
+
+```         
+("Mask_Donut_Ring@1" = 1) * "WorldDEMNeo_zu_5m@1" / ("Mask_Donut_Ring@1" = 1)
+```
+
+This resulted in a sparse layer called `Elevation_Donut_Only.tif`, containing only the valid ground heights I would need for interpolation.
+
+## Phase 2: Creation of the Topographic Patch
+
+In this second phase, my goal was to generate a new, artificial terrain surface to fill the "holes" left by the removed structures. This surface needed to bridge the gap smoothly, connecting the natural ground on one side of each canal to the natural ground on the other side.
+
+### Step 1: Creating "Anchor" Points
+
+**What I was trying to achieve:** Since interpolation works by computing weighted averages from known points, I needed to convert my raster reference data into a set of discrete points. I wanted to turn every valid pixel in my Donut Ring into a specific point in space (X, Y) carrying its elevation value (Z), which would act as an anchor for the IDW interpolation.
+
+**How I did it:** I used the "Raster pixels to points" tool in QGIS on my `Elevation_Donut_Only.tif` layer. This generated a vector point layer saved as a GeoPackage, containing 168,330 points. Each point carried the exact elevation value of the natural ground immediately adjacent to the structures, stored in a column called `VALUE`.
+
+### Step 2: IDW Interpolation (Targeted Approach in R)
+
+**What I was trying to achieve:** I needed to use Inverse Distance Weighting (IDW) to create a smooth surface across each structure hole, using only the Donut Ring anchor points as input. The challenge was computational: the study area covers approximately 40,000 km² at 5 m resolution (roughly 40 million pixels), and running IDW across the full extent in QGIS proved infeasible — the tool attempted to compute interpolated values for every pixel in the raster, causing memory crashes and temporary files exceeding 300 GB.
+
+**How I solved the computational problem:** Instead of computing IDW for the entire raster extent, I wrote an R script that performs targeted interpolation — computing IDW values only for the pixels that actually need replacement (where the structure mask equals 1). This reduced the computation from \~40 million pixels to only the small fraction covered by structures (approximately 1–2% of the total area).
+
+**How the R script works:**
+
+1.  **Load the data:** The DEM, structure mask, and donut ring points are loaded into R using the `terra` and `sf` packages.
+
+2.  **Align the grids:** A sanity check confirmed that the structure mask had a slightly different extent than the DEM (2 m offset on the eastern edge). I corrected this by resampling the mask to match the DEM grid exactly, using nearest-neighbour interpolation to preserve the binary (0/1) values.
+
+3.  **Identify target pixels:** Rather than processing the entire raster, the script extracts only the cell indices where the mask equals 1, along with their geographic coordinates. This is the key efficiency gain.
+
+4.  **Build a KD-tree spatial index:** The script uses the `RANN` package to build a KD-tree on the 168,330 donut ring points. A KD-tree is a data structure that organises points in space for extremely fast nearest-neighbour searches, reducing lookup complexity from O(n) to approximately O(log n).
+
+5.  **Compute IDW for target pixels only:** For each structure pixel, the KD-tree finds the 12 nearest anchor points and their distances. The IDW weighted average is then computed using the formula:
+
+    -   Weight for each neighbour: w_i = 1 / d_i²
+    -   Estimated elevation: z = Σ(w_i × z_i) / Σ(w_i)
+
+    IDW parameters used: **power = 2**, **k = 12 nearest neighbours**.
+
+## Phase 3: The Final Merge
+
+In this final phase, my goal was to stitch the interpolated "patch" values into the original DEM, replacing only the structure pixels while preserving all original elevation data elsewhere.
+
+### Step 1: Conditional Merge
+
+**What I was trying to achieve:** I needed to create a single, seamless DEM where the modern structures have been digitally replaced with a smooth terrain surface, while the rest of the landscape remains untouched.
+
+**How I did it:** Within the same R script, I created a copy of the original DEM and selectively replaced only the pixels where the structure mask equalled 1 with their corresponding IDW-interpolated values. All other pixels retained their original WorldDEM elevation. The result was saved as `DEM_corrected.tif` in GeoTIFF format (32-bit float).
+
+The conditional logic is equivalent to:
+
+```         
+If pixel is Structure (Mask = 1) → Use IDW interpolated value
+If pixel is Ground (Mask = 0)   → Use original WorldDEM value
+```
+
+## Technical Specifications
+
+| Parameter | Value |
+|------------------------------------|------------------------------------|
+| Base DEM | WorldDEM Neo (Feature Preserving Smoothed) |
+| Resolution | 5 metres |
+| CRS | EPSG:32638 (WGS 84 / UTM Zone 38N) |
+| Study area | \~40,000 km² (4,986 × 8,182 pixels) |
+| Structure polygons | `zabalam_structures_final` (buffered: 125 m / 75 m) |
+| Donut ring width | 10 metres |
+| Reference points | 168,330 |
+| IDW power | 2 |
+| IDW neighbours (k) | 12 |
+| Software | QGIS (mask preparation), R with `terra`, `sf`, `RANN` (interpolation) |
+| Output | `DEM_corrected.tif` (32-bit float GeoTIFF) |
+
 ```{r}
 # =============================================================================
 # TARGETED IDW INTERPOLATION FOR LEVEE REMOVAL
@@ -222,4 +320,266 @@ writeRaster(
 )
 
 cat("Output saved to:", output_path, "\n")
+```
+
+# Midline step artifact
+
+## The Problem
+
+Following the initial IDW interpolation, a systematic elevation discontinuity was observed at the approximate centreline of wider interpolated structures. This artifact manifests as a visible "step" in cross-sectional elevation profiles, where the interpolated surface transitions abruptly between values dominated by reference points on one bank and those dominated by the opposite bank.
+
+This behaviour is a well-documented structural limitation of IDW interpolation. Because IDW computes a distance-weighted average of neighbouring reference points, the interpolated value at any given pixel is disproportionately influenced by whichever bank's reference points happen to be closest. At the geometric midline of a structure — where the nearest-neighbour set transitions from one bank to the other — the weighted average shifts abruptly rather than gradually, producing the observed discontinuity. This effect is particularly pronounced when reference points are arranged in parallel linear configurations, as is inherently the case with donut rings surrounding canal structures.
+
+Attempts to mitigate the artifact through parameter adjustment alone (increasing the number of neighbours from k=12 to k=50, and reducing the IDW power from 2.0 to 1.5) proved ineffective. This is because the fundamental geometry of the problem remains unchanged: regardless of how many neighbours are considered, the reference points on each side of the structure still form two parallel clusters, and the dominance transition between them remains abrupt. Widening the donut ring from 10 m to 50 m was also tested, but produced no meaningful improvement for the same geometric reason.
+
+Two alternative approaches were therefore developed and tested.
+
+------------------------------------------------------------------------
+
+## Solution A: Post-IDW Focal Smoothing
+
+### Rationale
+
+Rather than modifying the interpolation algorithm itself, Solution A applies a post-processing step to attenuate the midline discontinuity. The approach uses iterative focal (moving-window) mean filtering, applied exclusively within the structure mask to preserve the integrity of the original DEM elsewhere.
+
+The logic is straightforward: a mean filter replaces each pixel's value with the average of its surrounding neighbourhood. When applied repeatedly, sharp transitions are progressively smoothed into gentle gradients. By restricting the operation to pixels where the structure mask equals 1, only the interpolated patch is affected — the original WorldDEM terrain remains untouched.
+
+### Implementation
+
+The smoothing was implemented in R using the `terra` package's `focal()` function. Three parameters govern the behaviour of the filter:
+
+-   **Window size** — defines the spatial extent of the averaging neighbourhood. A 7×7 pixel window (35 m × 35 m at 5 m resolution) was selected as a starting configuration, providing sufficient spatial reach to bridge the midline discontinuity without over-smoothing the interpolated surface.
+
+-   **Number of passes** — controls how many times the filter is applied iteratively. Each successive pass further attenuates remaining sharp transitions. Three passes were used as an initial configuration.
+
+-   **Mask restriction** — after each smoothing pass, the `ifel()` conditional function was used to retain smoothed values only inside the structure mask (mask = 1), while preserving the unmodified DEM values everywhere else (mask = 0).
+
+### Advantages and Limitations
+
+Solution A has the advantage of being a minimal modification to the existing IDW workflow: the interpolation methodology remains as specified, and the smoothing is applied as a clearly documented post-processing step. However, it is fundamentally a corrective measure rather than a resolution of the underlying cause. The smoothing filter also introduces a degree of spatial averaging that slightly reduces the fidelity of the interpolated surface to the reference elevation data.
+
+------------------------------------------------------------------------
+
+## Solution B: TIN (Delaunay) Linear Interpolation
+
+### Rationale
+
+Solution B addresses the midline artifact at its source by replacing IDW with a fundamentally different interpolation method: Triangulated Irregular Network (TIN) interpolation based on Delaunay triangulation.
+
+The key distinction lies in how each method bridges the gap between opposing banks. IDW computes a weighted average of surrounding points — an operation that is inherently susceptible to abrupt transitions when reference points are clustered on opposing sides of a void. TIN, by contrast, constructs triangles that directly connect points from both banks. Within each triangle, elevation is interpolated linearly using barycentric coordinates. Because adjacent triangles share two vertices, the resulting surface is continuous across triangle edges, and the linear interpolation within each triangle produces a smooth, monotonic gradient from one bank to the other. No midline discontinuity can arise.
+
+### Implementation
+
+The TIN interpolation was implemented in R using the `geometry` package, following three computational steps:
+
+**Step 1 — Delaunay triangulation.** The `delaunayn()` function was used to construct a Delaunay triangulation from the donut ring reference points. The Delaunay criterion ensures that the resulting triangles maximise their minimum interior angles, avoiding excessively elongated triangles that could introduce interpolation artefacts. The output is an index matrix where each row defines one triangle by referencing three vertices in the coordinate array.
+
+**Step 2 — Point-in-triangle search.** For each structure pixel requiring interpolation, the `tsearchn()` function was used to determine which triangle (if any) contains the pixel's coordinate, and to compute the corresponding barycentric coordinates (λ₁, λ₂, λ₃). Barycentric coordinates describe the relative position of a point within its enclosing triangle and always sum to 1. A point at a vertex has coordinates (1, 0, 0); a point at the centroid has coordinates (⅓, ⅓, ⅓).
+
+**Step 3 — Linear interpolation.** The interpolated elevation at each structure pixel was computed as the barycentric weighted sum of its triangle's vertex elevations:
+
+```         
+z = λ₁·z₁ + λ₂·z₂ + λ₃·z₃
+```
+
+This produces a piecewise-linear surface across the triangulation — smooth within each triangle and continuous across shared edges.
+
+Structure pixels falling outside the convex hull of the triangulation (typically a small number at the extreme edges of the study area) retained their original DEM values, as no enclosing triangle exists for extrapolation.
+
+### Advantages and Limitations
+
+Solution B eliminates the midline step artifact entirely, producing a surface that transitions smoothly and monotonically across interpolated structures. The method is computationally efficient, as the Delaunay triangulation and barycentric search are both well-optimised algorithms.
+
+The primary limitation is that TIN interpolation produces a piecewise-linear surface, which may appear slightly "faceted" at very fine scales compared to the smoother (but artifact-prone) IDW surface. In practice, at 5 m resolution and across the structure widths involved (150–400 m), this effect is negligible. A second consideration is that TIN cannot extrapolate beyond the convex hull of the reference points, meaning a small number of edge pixels may require fallback to IDW or retention of original values.
+
+```{r}
+# =============================================================================
+# OPTION A: POST-IDW SMOOTHING (run AFTER your existing IDW script)
+# =============================================================================
+# This applies iterative mean smoothing ONLY inside the structure mask,
+# leaving all original DEM pixels untouched.
+#
+# The idea: a moving average window replaces each pixel's value with
+# the mean of its neighbors. Repeated passes progressively smooth out
+# the sharp step artifact. By restricting this to the mask area, 
+# the original terrain is never modified.
+# =============================================================================
+
+library(terra)
+
+# ---- Load your IDW result and mask ----
+dem_idw  <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected_50m.tif")
+mask     <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Mask_Structure.tif")
+
+# ---- Parameters ----
+window_size <- 7     # Size of the smoothing window (7x7 pixels = 35m x 35m)
+n_passes    <- 3     # Number of smoothing iterations
+                     # More passes = smoother result
+                     # Start with 3, increase if step persists
+
+# ---- Iterative smoothing inside mask only ----
+dem_smooth <- dem_idw  # Start with the IDW result
+
+for (i in 1:n_passes) {
+  cat("Smoothing pass", i, "of", n_passes, "...\n")
+  
+  # focal() computes a moving window statistic for every pixel.
+  # fun = "mean" computes the average of all pixels in the window.
+  # na.rm = TRUE ignores NoData pixels at raster edges.
+  # The window is a square of window_size x window_size pixels.
+  smoothed <- focal(dem_smooth, w = window_size, fun = "mean", na.rm = TRUE)
+  
+  # Now the key trick: only replace pixels INSIDE the mask.
+  # Where mask == 1, use the smoothed value. Elsewhere, keep the original.
+  # ifel() is terra's conditional function (like ifelse for rasters).
+  dem_smooth <- ifel(mask == 1, smoothed, dem_smooth)
+}
+
+# ---- Save result ----
+output_a <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected_50m_smoothed.tif"
+writeRaster(dem_smooth, output_a, overwrite = TRUE, datatype = "FLT4S")
+```
+
+```{r}
+# =============================================================================
+# OPTION B: TIN (LINEAR) INTERPOLATION (replaces IDW entirely)
+# =============================================================================
+# Instead of IDW, this builds a Delaunay triangulation (TIN) from the
+# donut ring points and interpolates linearly within each triangle.
+#
+# Why TIN avoids the step artifact:
+# IDW computes a weighted AVERAGE — at the midline between two banks,
+# the weights flip abruptly from one side to the other.
+# TIN builds TRIANGLES connecting points from both banks directly.
+# A triangle spanning the full canal width interpolates linearly
+# from one bank's elevation to the other, creating a smooth gradient
+# with no discontinuity.
+# =============================================================================
+
+library(terra)
+library(sf)
+library(geometry)   # Provides delaunayn() and tsearchn()
+
+# ---- Load data ----
+dem         <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/WorldDEMNeo_zu_5m.tif")
+mask        <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Mask_Structure.tif")
+pts         <- st_read("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Points_for_Interpolation_50m.gpkg")
+output_b    <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected_TIN.tif"
+
+# Align mask
+if (!compareGeom(dem, mask, stopOnError = FALSE)) {
+  mask <- resample(mask, dem, method = "near")
+}
+
+# ---- Extract reference point data ----
+pts_coords <- st_coordinates(pts)   # [X, Y] matrix
+pts_z      <- pts$VALUE             # Elevation values
+
+cat("Reference points:", nrow(pts_coords), "\n")
+
+# ---- Identify structure pixels to fill ----
+mask_values <- values(mask)
+fill_idx    <- which(mask_values == 1)
+fill_xy     <- xyFromCell(dem, fill_idx)
+
+cat("Pixels to fill:", length(fill_idx), "\n")
+```
+
+```{r}
+# ---- Step 1: Build Delaunay Triangulation ----
+# delaunayn() takes a matrix of [X, Y] coordinates and returns a matrix
+# where each row defines one triangle by listing the indices of its
+# three vertices. This is the mathematical backbone of a TIN.
+#
+# Basically it connects all the donut ring points with triangles
+# such that no point falls inside any triangle's circumscribed circle
+# (this is what makes it "Delaunay" — it maximizes the minimum angle,
+# avoiding long skinny triangles where possible).
+
+tri <- delaunayn(pts_coords)
+# tri is a matrix with 3 columns: each row = [vertex1, vertex2, vertex3]
+# The values are indices into pts_coords and pts_z
+
+cat("Triangulation complete:", nrow(tri), "triangles\n")
+```
+
+```{r}
+# ---- Step 2: Locate each structure pixel within a triangle ----
+# tsearchn() finds which triangle each query point falls inside,
+# AND returns the barycentric coordinates.
+#
+# Barycentric coordinates (lambda1, lambda2, lambda3) describe where
+# a point sits within its triangle. They always sum to 1.
+# If a point is at vertex 1: lambda = (1, 0, 0)
+# If a point is at the centroid: lambda = (0.33, 0.33, 0.33)
+# They're the natural weights for linear interpolation inside a triangle.
+
+search_result <- tsearchn(pts_coords, tri, fill_xy)
+# Returns:
+#   $idx  — which triangle each point falls in (NA if outside the triangulation)
+#   $p    — barycentric coordinates (matrix: n_points x 3)
+
+# Check how many pixels fell outside the triangulation
+n_outside <- sum(is.na(search_result$idx))
+cat("Pixels inside triangulation:", length(fill_idx) - n_outside, "\n")
+```
+
+```{r}
+# ---- Step 3: Interpolate using barycentric coordinates ----
+# For each structure pixel that falls inside a triangle:
+#   z = lambda1 * z_vertex1 + lambda2 * z_vertex2 + lambda3 * z_vertex3
+#
+# This is LINEAR interpolation — it creates a perfectly smooth plane
+# across each triangle, with no discontinuities at triangle edges
+# (because adjacent triangles share two vertices).
+
+cat("Computing TIN interpolation...\n")
+
+# Get the triangle index and barycentric coords for each pixel
+tri_idx    <- search_result$idx       # Which triangle (row in tri matrix)
+bary_coords <- search_result$p        # Barycentric coordinates [n x 3]
+
+# For pixels inside the triangulation, compute interpolated elevation
+inside <- !is.na(tri_idx)
+
+# Get the three vertex indices for each pixel's triangle
+v1 <- tri[tri_idx[inside], 1]   # Index of vertex 1
+v2 <- tri[tri_idx[inside], 2]   # Index of vertex 2  
+v3 <- tri[tri_idx[inside], 3]   # Index of vertex 3
+
+# Get the elevation at each vertex
+z1 <- pts_z[v1]
+z2 <- pts_z[v2]
+z3 <- pts_z[v3]
+
+# Get the barycentric weights
+w1 <- bary_coords[inside, 1]
+w2 <- bary_coords[inside, 2]
+w3 <- bary_coords[inside, 3]
+
+# Linear interpolation
+tin_values <- w1 * z1 + w2 * z2 + w3 * z3
+
+cat("Elevation range:", round(min(tin_values), 2), 
+    "to", round(max(tin_values), 2), "m\n")
+
+```
+
+```{r}
+# ---- Step 4: Build the corrected DEM ----
+dem_corrected <- dem
+dem_vals <- values(dem_corrected)
+
+# Only replace pixels that are both in the mask AND inside the triangulation
+fill_idx_inside <- fill_idx[inside]
+dem_vals[fill_idx_inside] <- tin_values
+
+# For pixels in the mask but outside the triangulation (edges), 
+# they keep their original DEM value. You could also fall back to IDW
+
+values(dem_corrected) <- dem_vals
+
+# ---- Save ----
+writeRaster(dem_corrected, output_b, overwrite = TRUE, datatype = "FLT4S")
+cat("\nOption B saved to:", output_b, "\n")
 ```
