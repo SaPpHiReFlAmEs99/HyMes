@@ -399,7 +399,7 @@ The primary limitation is that TIN interpolation produces a piecewise-linear sur
 # This applies iterative mean smoothing ONLY inside the structure mask,
 # leaving all original DEM pixels untouched.
 #
-# The idea: a moving average window replaces each pixel's value with
+# A moving average window replaces each pixel's value with
 # the mean of its neighbors. Repeated passes progressively smooth out
 # the sharp step artifact. By restricting this to the mask area, 
 # the original terrain is never modified.
@@ -407,15 +407,14 @@ The primary limitation is that TIN interpolation produces a piecewise-linear sur
 
 library(terra)
 
-# ---- Load your IDW result and mask ----
-dem_idw  <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected_50m.tif")
+# ---- Load the IDW or TIN result and mask ----
+dem_idw  <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected_TIN.tif")
 mask     <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Mask_Structure.tif")
 
 # ---- Parameters ----
 window_size <- 7     # Size of the smoothing window (7x7 pixels = 35m x 35m)
-n_passes    <- 3     # Number of smoothing iterations
+n_passes    <- 1     # Number of smoothing iterations
                      # More passes = smoother result
-                     # Start with 3, increase if step persists
 
 # ---- Iterative smoothing inside mask only ----
 dem_smooth <- dem_idw  # Start with the IDW result
@@ -436,7 +435,7 @@ for (i in 1:n_passes) {
 }
 
 # ---- Save result ----
-output_a <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected_50m_smoothed.tif"
+output_a <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected_TIN_smoothed1.tif"
 writeRaster(dem_smooth, output_a, overwrite = TRUE, datatype = "FLT4S")
 ```
 
@@ -529,7 +528,7 @@ cat("Pixels inside triangulation:", length(fill_idx) - n_outside, "\n")
 # For each structure pixel that falls inside a triangle:
 #   z = lambda1 * z_vertex1 + lambda2 * z_vertex2 + lambda3 * z_vertex3
 #
-# This is LINEAR interpolation — it creates a perfectly smooth plane
+# This is LINEAR interpolation, it creates a perfectly smooth plane
 # across each triangle, with no discontinuities at triangle edges
 # (because adjacent triangles share two vertices).
 
@@ -575,7 +574,7 @@ fill_idx_inside <- fill_idx[inside]
 dem_vals[fill_idx_inside] <- tin_values
 
 # For pixels in the mask but outside the triangulation (edges), 
-# they keep their original DEM value. You could also fall back to IDW
+# they keep their original DEM value.
 
 values(dem_corrected) <- dem_vals
 
