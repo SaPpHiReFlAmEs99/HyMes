@@ -89,7 +89,7 @@ If pixel is Ground (Mask = 0)   → Use original WorldDEM value
 ## Technical Specifications
 
 | Parameter | Value |
-|------------------------------------|------------------------------------|
+|----|----|
 | Base DEM | WorldDEM Neo (Feature Preserving Smoothed) |
 | Resolution | 5 metres |
 | CRS | EPSG:32638 (WGS 84 / UTM Zone 38N) |
@@ -408,8 +408,8 @@ The primary limitation is that TIN interpolation produces a piecewise-linear sur
 library(terra)
 
 # ---- Load the IDW or TIN result and mask ----
-dem_idw  <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected_TIN.tif")
-mask     <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Mask_Structure.tif")
+dem_idw  <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Corrected_FathomDEM_clipped_UTM.tif")
+mask     <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Mask_Structure_Fathom.tif")
 
 # ---- Parameters ----
 window_size <- 7     # Size of the smoothing window (7x7 pixels = 35m x 35m)
@@ -435,7 +435,7 @@ for (i in 1:n_passes) {
 }
 
 # ---- Save result ----
-output_a <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected_TIN_smoothed1.tif"
+output_a <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/Corrected_FathomDEM_clipped_UTM_smoothed1.tif"
 writeRaster(dem_smooth, output_a, overwrite = TRUE, datatype = "FLT4S")
 ```
 
@@ -460,10 +460,10 @@ library(sf)
 library(geometry)   # Provides delaunayn() and tsearchn()
 
 # ---- Load data ----
-dem         <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/WorldDEMNeo_zu_5m.tif")
-mask        <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Mask_Structure.tif")
-pts         <- st_read("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Points_for_Interpolation_50m.gpkg")
-output_b    <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/DEM_corrected_TIN.tif"
+dem         <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/FathomDEM_clipped_UTM.tif")
+mask        <- rast("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Mask_Structure_Fathom.tif")
+pts         <- st_read("H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Donut_Points.gpkg")
+output_b    <- "H:/GIS_Structure/GE_Working_Folder/03_GE_Analysis/03b_GE_Intermediate_Files/DEM_prepatation_intermediate/Corrected_FathomDEM_clipped_UTM.tif"
 
 # Align mask
 if (!compareGeom(dem, mask, stopOnError = FALSE)) {
